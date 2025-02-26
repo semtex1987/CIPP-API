@@ -13,7 +13,6 @@ function Invoke-CIPPStandardPasswordExpireDisabled {
         CAT
             Entra (AAD) Standards
         TAG
-            "lowimpact"
             "CIS"
             "PWAgePolicyNew"
         ADDEDCOMPONENT
@@ -23,13 +22,16 @@ function Invoke-CIPPStandardPasswordExpireDisabled {
             Update-MgDomain
         RECOMMENDEDBY
             "CIS"
+            "CIPP"
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/edit-standards
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/entra-aad-standards#low-impact
     #>
 
     param($Tenant, $Settings)
+    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'PasswordExpireDisabled'
+
     $GraphRequest = New-GraphGetRequest -uri 'https://graph.microsoft.com/v1.0/domains' -tenantid $Tenant
     $DomainswithoutPassExpire = $GraphRequest | Where-Object -Property passwordValidityPeriodInDays -NE '2147483647'
 

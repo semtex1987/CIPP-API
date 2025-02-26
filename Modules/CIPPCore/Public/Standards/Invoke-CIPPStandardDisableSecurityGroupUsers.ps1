@@ -13,7 +13,6 @@ function Invoke-CIPPStandardDisableSecurityGroupUsers {
         CAT
             Entra (AAD) Standards
         TAG
-            "mediumimpact"
         ADDEDCOMPONENT
         IMPACT
             Medium Impact
@@ -23,10 +22,12 @@ function Invoke-CIPPStandardDisableSecurityGroupUsers {
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/edit-standards
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/entra-aad-standards#medium-impact
     #>
 
     param($Tenant, $Settings)
+    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'DisableSecurityGroupUsers'
+
     $CurrentInfo = New-GraphGetRequest -Uri 'https://graph.microsoft.com/beta/policies/authorizationPolicy/authorizationPolicy' -tenantid $Tenant
 
     If ($Settings.remediate -eq $true) {

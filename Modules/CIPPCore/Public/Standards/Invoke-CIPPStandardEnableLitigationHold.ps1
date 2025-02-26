@@ -13,7 +13,6 @@ function Invoke-CIPPStandardEnableLitigationHold {
         CAT
             Exchange Standards
         TAG
-            "lowimpact"
         ADDEDCOMPONENT
         IMPACT
             Low Impact
@@ -23,13 +22,14 @@ function Invoke-CIPPStandardEnableLitigationHold {
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/edit-standards
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/exchange-standards#low-impact
     #>
 
     param($Tenant, $Settings)
-    
-    $MailboxesNoLitHold = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-Mailbox' -cmdparams @{ Filter = 'LitigationHoldEnabled -eq "False"'} | Where-Object {$_.PersistedCapabilities -contains "BPOS_S_DlpAddOn" -or $_.PersistedCapabilities -contains "BPOS_S_Enterprise"}
-    
+    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'EnableLitigationHold'
+
+    $MailboxesNoLitHold = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-Mailbox' -cmdparams @{ Filter = 'LitigationHoldEnabled -eq "False"' } | Where-Object { $_.PersistedCapabilities -contains 'BPOS_S_DlpAddOn' -or $_.PersistedCapabilities -contains 'BPOS_S_Enterprise' }
+
     If ($Settings.remediate -eq $true) {
 
         if ($null -eq $MailboxesNoLitHold) {
