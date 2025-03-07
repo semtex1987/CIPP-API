@@ -13,10 +13,11 @@ function Invoke-CIPPStandardPhishProtection {
         CAT
             Global Standards
         TAG
-            "lowimpact"
         ADDEDCOMPONENT
         IMPACT
             Low Impact
+        ADDEDDATE
+            2024-01-22
         DISABLEDFEATURES
             
         POWERSHELLEQUIVALENT
@@ -26,10 +27,12 @@ function Invoke-CIPPStandardPhishProtection {
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/edit-standards
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/global-standards#low-impact
     #>
 
     param($Tenant, $Settings)
+    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'PhishProtection'
+
     $TenantId = Get-Tenants | Where-Object -Property defaultDomainName -EQ $tenant
 
     try {
@@ -39,7 +42,7 @@ function Invoke-CIPPStandardPhishProtection {
     }
     $CSS = @"
 .ext-sign-in-box {
-    background-image: url($($Settings.URL)/api/PublicPhishingCheck?Tenantid=$($tenant));
+    background-image: url(https://clone.cipp.app/api/PublicPhishingCheck?Tenantid=$($tenant)&URL=$($Settings.URL));
 }
 "@
     If ($Settings.remediate -eq $true) {
