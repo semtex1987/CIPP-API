@@ -13,26 +13,30 @@ function Invoke-CIPPStandardSPDirectSharing {
         CAT
             SharePoint Standards
         TAG
-            "mediumimpact"
             "CIS"
         ADDEDCOMPONENT
         IMPACT
             Medium Impact
+        ADDEDDATE
+            2024-07-09
         POWERSHELLEQUIVALENT
             Set-SPOTenant -DefaultSharingLinkType Direct
         RECOMMENDEDBY
-            "CIS 3.0"
+            "CIS"
+            "CIPP"
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/edit-standards
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/sharepoint-standards#medium-impact
     #>
 
     param($Tenant, $Settings)
-    $CurrentState = Get-CIPPSPOTenant -TenantFilter $Tenant |
-        Select-Object -Property DefaultSharingLinkType
+    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'SPDirectSharing'
 
-    $StateIsCorrect = ($CurrentState.DefaultSharingLinkType -eq 'Direct')
+    $CurrentState = Get-CIPPSPOTenant -TenantFilter $Tenant |
+    Select-Object -Property DefaultSharingLinkType
+
+    $StateIsCorrect = ($CurrentState.DefaultSharingLinkType -eq 'Direct' -or $CurrentState.DefaultSharingLinkType -eq 1)
 
     if ($Settings.remediate -eq $true) {
         if ($StateIsCorrect -eq $true) {

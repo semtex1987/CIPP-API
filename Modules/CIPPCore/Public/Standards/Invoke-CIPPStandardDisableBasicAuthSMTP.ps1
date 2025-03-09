@@ -13,20 +13,25 @@ function Invoke-CIPPStandardDisableBasicAuthSMTP {
         CAT
             Global Standards
         TAG
-            "mediumimpact"
         ADDEDCOMPONENT
         IMPACT
             Medium Impact
+        ADDEDDATE
+            2021-11-16
         POWERSHELLEQUIVALENT
             Set-TransportConfig -SmtpClientAuthenticationDisabled \$true
         RECOMMENDEDBY
+            "CIS"
+            "CIPP"
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/edit-standards
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/global-standards#medium-impact
     #>
 
     param($Tenant, $Settings)
+    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'DisableBasicAuthSMTP'
+
     $CurrentInfo = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-TransportConfig'
     $SMTPusers = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-CASMailbox' -cmdParams @{ ResultSize = 'Unlimited' } | Where-Object { ($_.SmtpClientAuthenticationDisabled -eq $false) }
 
