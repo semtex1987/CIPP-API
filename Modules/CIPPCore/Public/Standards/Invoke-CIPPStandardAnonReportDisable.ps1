@@ -13,20 +13,24 @@ function Invoke-CIPPStandardAnonReportDisable {
         CAT
             Global Standards
         TAG
-            "lowimpact"
         ADDEDCOMPONENT
         IMPACT
             Low Impact
+        ADDEDDATE
+            2021-11-16
         POWERSHELLEQUIVALENT
             Update-MgBetaAdminReportSetting -BodyParameter @{displayConcealedNames = \$true}
         RECOMMENDEDBY
+            "CIPP"
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/edit-standards
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/global-standards#low-impact
     #>
 
     param($Tenant, $Settings)
+    #$Rerun -Type Standard -Tenant $Tenant -API 'allowOTPTokens' -Settings $Settings
+
     $CurrentInfo = New-GraphGetRequest -Uri 'https://graph.microsoft.com/beta/admin/reportSettings' -tenantid $Tenant -AsApp $true
 
     If ($Settings.remediate -eq $true) {
