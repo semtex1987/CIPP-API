@@ -2,6 +2,9 @@ function Start-UpdatePermissionsOrchestrator {
     <#
     .SYNOPSIS
     Start the Update Permissions Orchestrator
+
+    .FUNCTIONALITY
+    Entrypoint
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param()
@@ -15,7 +18,7 @@ function Start-UpdatePermissionsOrchestrator {
             'displayName'       = '*Partner Tenant'
         }
 
-        $TenantList = Get-Tenants -IncludeAll | Where-Object { $_.Excluded -eq $false -and $_.delegatedPrivilegeStatus -eq 'directTenant' }
+        $TenantList = Get-Tenants -IncludeAll | Where-Object { $_.Excluded -eq $false }
 
         $Tenants = [System.Collections.Generic.List[object]]::new()
         foreach ($Tenant in $TenantList) {
