@@ -15,6 +15,8 @@ function Invoke-CIPPStandardQuarantineTemplate {
         DISABLEDFEATURES
             {"report":false,"warn":false,"remediate":false}
         TAG
+        EXECUTIVETEXT
+            Creates standardized quarantine policies that define how employees can interact with quarantined emails, including permissions to release, delete, or preview suspicious messages. This ensures consistent security handling across the organization while providing appropriate user access to manage quarantined content.
         ADDEDCOMPONENT
             {"type":"autoComplete","multiple":false,"creatable":true,"name":"displayName","label":"Quarantine Display Name","required":true}
             {"type":"switch","label":"Enable end-user spam notifications","name":"ESNEnabled","defaultValue":true,"required":false}
@@ -36,182 +38,130 @@ function Invoke-CIPPStandardQuarantineTemplate {
         UPDATECOMMENTBLOCK
             Run the Tools\Update-StandardsComments.ps1 script to update this comment block
     .LINK
-        https://docs.cipp.app/user-documentation/tenant/standards/list-standards/defender-standards#low-impact
+        https://docs.cipp.app/user-documentation/tenant/standards/list-standards
     #>
 
     param($Tenant, $Settings)
+    $TestResult = Test-CIPPStandardLicense -StandardName 'QuarantineTemplate' -TenantFilter $Tenant -RequiredCapabilities @('EXCHANGE_S_STANDARD', 'EXCHANGE_S_ENTERPRISE', 'EXCHANGE_S_STANDARD_GOV', 'EXCHANGE_S_ENTERPRISE_GOV', 'EXCHANGE_LITE') #No Foundation because that does not allow powershell access
 
+    if ($TestResult -eq $false) {
+        return $true
+    } #we're done.
 
-    function Convert-HashtableToEndUserQuarantinePermissionsValue {
-        param (
-            [hashtable]$InputHashtable
-        )
-        #Converts hashtable with selected end user quarantine permissions to decimal value used by EndUserQuarantinePermissionsValue property in New-QuarantinePolicy and Set-QuarantinePolicy
-        try {
-            $EndUserQuarantinePermissionsValue = 0
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToViewHeader * 128
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToDownload * 64
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToAllowSender * 32
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToBlockSender * 16
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToRequestRelease * 8
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToRelease * 4
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToPreview * 2
-            $EndUserQuarantinePermissionsValue += [int]$InputHashtable.PermissionToDelete * 1
-            return $EndUserQuarantinePermissionsValue
-        }
-        catch {
-            $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-            throw "Convert-HashtableToEndUserQuarantinePermissionsValue: Failed to hashtable QuarantinePermissionsValue. Error: $ErrorMessage"
-        }
-    }
-
-    function Convert-StringToHashtable {
-        param (
-            [string]$InputString
-        )
-        #Converts string value with EndUserQuarantinePermissions received from Get-QuarantinePolicy
-        try {
-            # Remove square brackets and split into lines
-            $InputString = $InputString.Trim('[', ']')
-            $hashtable = @{}
-            $InputString -split "`n" | ForEach-Object {
-                $key, $value = $_ -split ":\s*"
-                $hashtable[$key.Trim()] = [System.Convert]::ToBoolean($value.Trim())
-            }
-            return $hashtable
-        }
-        catch {
-            $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-            throw "Convert-StringToHashtable: Failed to convert string to hashtable. Error: $ErrorMessage"
-        }
-    }
+    $APIName = 'Standards'
 
     try {
         # Get the current custom quarantine policies
-        $CurrentPolicies = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-QuarantinePolicy' | Where-Object -Property Guid -ne '00000000-0000-0000-0000-000000000000' -ErrorAction Stop
+        $CurrentPolicies = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-QuarantinePolicy' | Where-Object -Property Guid -NE '00000000-0000-0000-0000-000000000000' -ErrorAction Stop
 
         # Compare the settings from standard with the current policies
         $CompareList = foreach ($Policy in $Settings) {
             try {
-                # prepare the cmdParams used in New-ExoRequest
-                $cmdParams = @{
-                    ESNEnabled                              = $Policy.ESNEnabled
-                    IncludeMessagesFromBlockedSenderAddress = $Policy.IncludeMessagesFromBlockedSenderAddress
-                }
-
-                # Create hashtable with desired EndUserQuarantinePermissions
-                $EndUserQuarantinePermissions   = @{
-                    PermissionToBlockSender = $Policy.PermissionToBlockSender
-                    PermissionToDelete  = $Policy.PermissionToDelete
-                    PermissionToDownload    = $false
-                    PermissionToPreview = $Policy.PermissionToPreview
-                    PermissionToRelease = if ($Policy.ReleaseAction -eq "PermissionToRelease") { $true } else { $false }
-                    PermissionToRequestRelease  = if ($Policy.ReleaseAction -eq "PermissionToRequestRelease") { $true } else { $false }
-                    PermissionToViewHeader  = $true
-                    PermissionToAllowSender = $Policy.PermissionToAllowSender
+                # Create hashtable with desired Quarantine Setting
+                $EndUserQuarantinePermissions = @{
+                    # ViewHeader and Download are set to false because the value 0 or 1 does nothing per Microsoft documentation
+                    PermissionToViewHeader     = $false
+                    PermissionToDownload       = $false
+                    PermissionToBlockSender    = $Policy.PermissionToBlockSender
+                    PermissionToDelete         = $Policy.PermissionToDelete
+                    PermissionToPreview        = $Policy.PermissionToPreview
+                    PermissionToRelease        = $Policy.ReleaseAction -eq 'PermissionToRelease' ? $true : $false
+                    PermissionToRequestRelease = $Policy.ReleaseAction -eq 'PermissionToRequestRelease' ? $true : $false
+                    PermissionToAllowSender    = $Policy.PermissionToAllowSender
                 }
 
                 # If the Quarantine Policy already exists
                 if ($Policy.displayName.value -in $CurrentPolicies.Name) {
                     #Get the current policy and convert EndUserQuarantinePermissions from string to hashtable for compare
-                    $ExistingPolicy = $CurrentPolicies | Where-Object -Property Name -eq $Policy.displayName.value
-                    $ExistingPolicyEndUserQuarantinePermissions = Convert-StringToHashtable -InputString $ExistingPolicy.EndUserQuarantinePermissions -ErrorAction Stop
+                    $ExistingPolicy = $CurrentPolicies | Where-Object -Property Name -EQ $Policy.displayName.value
+                    $ExistingPolicyEndUserQuarantinePermissions = Convert-QuarantinePermissionsValue -InputObject $ExistingPolicy.EndUserQuarantinePermissions -ErrorAction Stop
 
                     #Compare the current policy
                     $StateIsCorrect = ($ExistingPolicy.Name -eq $Policy.displayName.value) -and
-                                ($ExistingPolicy.ESNEnabled -eq $Policy.ESNEnabled) -and
-                                ($ExistingPolicy.IncludeMessagesFromBlockedSenderAddress -eq $Policy.IncludeMessagesFromBlockedSenderAddress) -and
-                                (!(Compare-Object @($ExistingPolicyEndUserQuarantinePermissions.values) @($EndUserQuarantinePermissions.values)))
+                    ($ExistingPolicy.ESNEnabled -eq $Policy.ESNEnabled) -and
+                    ($ExistingPolicy.IncludeMessagesFromBlockedSenderAddress -eq $Policy.IncludeMessagesFromBlockedSenderAddress) -and
+                    (!(Compare-Object @($ExistingPolicyEndUserQuarantinePermissions.values) @($EndUserQuarantinePermissions.values)))
 
                     # If the current policy is correct
                     if ($StateIsCorrect -eq $true) {
                         [PSCustomObject]@{
-                            missing         = $false
-                            StateIsCorrect  = $StateIsCorrect
-                            displayName     = $Policy.displayName.value
-                            EndUserQuarantinePermissions = $EndUserQuarantinePermissions
-                            cmdParams       = $cmdParams
-                            remediate       = $Policy.remediate
-                            alert           = $Policy.alert
-                            report          = $Policy.report
+                            missing                                 = $false
+                            StateIsCorrect                          = $StateIsCorrect
+                            Action                                  = 'None'
+                            displayName                             = $Policy.displayName.value
+                            EndUserQuarantinePermissions            = $EndUserQuarantinePermissions
+                            ESNEnabled                              = $Policy.ESNEnabled
+                            IncludeMessagesFromBlockedSenderAddress = $Policy.IncludeMessagesFromBlockedSenderAddress
+                            remediate                               = $Policy.remediate
+                            alert                                   = $Policy.alert
+                            report                                  = $Policy.report
                         }
                     }
                     #If the current policy doesn't match the desired settings
                     else {
                         [PSCustomObject]@{
-                            missing         = $false
-                            StateIsCorrect  = $StateIsCorrect
-                            displayName     = $Policy.displayName.value
-                            EndUserQuarantinePermissions = $EndUserQuarantinePermissions
-                            cmdParams       = $cmdParams
-                            remediate       = $Policy.remediate
-                            alert           = $Policy.alert
-                            report          = $Policy.report
+                            missing                                 = $false
+                            StateIsCorrect                          = $StateIsCorrect
+                            Action                                  = 'Update'
+                            displayName                             = $Policy.displayName.value
+                            EndUserQuarantinePermissions            = $EndUserQuarantinePermissions
+                            ESNEnabled                              = $Policy.ESNEnabled
+                            IncludeMessagesFromBlockedSenderAddress = $Policy.IncludeMessagesFromBlockedSenderAddress
+                            remediate                               = $Policy.remediate
+                            alert                                   = $Policy.alert
+                            report                                  = $Policy.report
                         }
                     }
                 }
                 #If no existing Quarantine Policy with the same name was found
                 else {
                     [PSCustomObject]@{
-                        missing         = $true
-                        StateIsCorrect  = $false
-                        displayName     = $Policy.displayName.value
-                        EndUserQuarantinePermissions = $EndUserQuarantinePermissions
-                        cmdParams       = $cmdParams
-                        remediate       = $Policy.remediate
-                        alert           = $Policy.alert
-                        report          = $Policy.report
+                        missing                                 = $true
+                        StateIsCorrect                          = $false
+                        Action                                  = 'Create'
+                        displayName                             = $Policy.displayName.value
+                        EndUserQuarantinePermissions            = $EndUserQuarantinePermissions
+                        ESNEnabled                              = $Policy.ESNEnabled
+                        IncludeMessagesFromBlockedSenderAddress = $Policy.IncludeMessagesFromBlockedSenderAddress
+                        remediate                               = $Policy.remediate
+                        alert                                   = $Policy.alert
+                        report                                  = $Policy.report
                     }
                 }
-            }
-            catch {
+            } catch {
                 $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-                Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to compare Quarantine policy $($Policy.displayName.value), Error: $ErrorMessage" -sev 'Error'
+                $Message = "Failed to compare Quarantine policy $($Policy.displayName.value), Error: $ErrorMessage"
+                Write-LogMessage -API $APIName -tenant $tenant -message $Message -sev 'Error'
+                return $Message
             }
         }
 
 
-        If ($true -in $Settings.remediate) {
+        if ($true -in $Settings.remediate) {
             # Remediate each policy which is incorrect or missing
-            foreach ($Policy in $CompareList | Where-Object { $_.remediate -EQ $true -and $_.StateIsCorrect -eq $false }) {
+            foreach ($Policy in $CompareList | Where-Object { $_.remediate -eq $true -and $_.StateIsCorrect -eq $false }) {
                 try {
-                    # Convert desired EndUserQuarantinePermissions to decimal value
-                    $EndUserQuarantinePermissionsValue = Convert-HashtableToEndUserQuarantinePermissionsValue -InputHashtable $Policy.EndUserQuarantinePermissions -ErrorAction Stop
-                    $cmdParams = $Policy.cmdParams
-
-                    # Create policy if missing
-                    if ($Policy.missing) {
-                        try {
-                            #Add the rest of the desired settings to cmdParams
-                            $cmdParams.Add('Name', $Policy.displayName)
-                            $cmdParams.Add('EndUserQuarantinePermissionsValue', $EndUserQuarantinePermissionsValue)
-
-                            New-ExoRequest -tenantid $Tenant -cmdlet 'New-QuarantinePolicy' -cmdParams $cmdParams -UseSystemMailbox $true -ErrorAction Stop
-                            Write-LogMessage -API 'Standards' -tenant $Tenant -message "Created Custom Quarantine Policy $($Policy.displayName)" -sev Info
-                        }
-                        catch {
-                            $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-                            Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to create Quarantine policy $($Policy.displayName), Error: $ErrorMessage" -sev 'Error'
-                        }
+                    # Parameters for splatting to Set-CIPPQuarantinePolicy
+                    $Params = @{
+                        Action                                  = $Policy.Action
+                        Identity                                = $Policy.displayName
+                        EndUserQuarantinePermissions            = $Policy.EndUserQuarantinePermissions
+                        ESNEnabled                              = $Policy.ESNEnabled
+                        IncludeMessagesFromBlockedSenderAddress = $Policy.IncludeMessagesFromBlockedSenderAddress
+                        tenantFilter                            = $Tenant
+                        APIName                                 = $APIName
                     }
-                    # Update policy if incorrect
-                    else {
-                        try {
-                            #Add the rest of the desired settings to cmdParams
-                            $cmdParams.Add('Identity', $Policy.displayName)
-                            $cmdParams.Add('EndUserQuarantinePermissionsValue', $EndUserQuarantinePermissionsValue)
 
-                            New-ExoRequest -tenantid $Tenant -cmdlet 'Set-QuarantinePolicy' -cmdParams $cmdParams -UseSystemMailbox $true -ErrorAction Stop
-                            Write-LogMessage -API 'Standards' -tenant $Tenant -message "Updated Custom Quarantine Policy $($Policy.displayName)" -sev Info
-                        }
-                        catch {
-                            Write-LogMessage -API 'Standards' -tenant $Tenant -message "Failed to update Custom Quarantine Policy $($Policy.displayName)" -sev Error -LogData $_
-                        }
+                    try {
+                        Set-CIPPQuarantinePolicy @Params
+                        Write-LogMessage -API $APIName -tenant $Tenant -message "$($Policy.Action)d Custom Quarantine Policy '$($Policy.displayName)'" -sev Info
+                    } catch {
+                        $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
+                        Write-LogMessage -API $APIName -tenant $tenant -message "Failed to $($Policy.Action) Quarantine policy $($Policy.displayName), Error: $ErrorMessage" -sev 'Error'
                     }
-                }
-                catch {
+                } catch {
                     $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-                    Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to create or update Quarantine policy $($Policy.displayName), Error: $ErrorMessage" -sev 'Error'
+                    Write-LogMessage -API $APIName -tenant $tenant -message "Failed to create or update Quarantine policy $($Policy.displayName), Error: $ErrorMessage" -sev 'Error'
                 }
             }
         }
@@ -219,32 +169,49 @@ function Invoke-CIPPStandardQuarantineTemplate {
         if ($true -in $Settings.alert) {
             foreach ($Policy in $CompareList | Where-Object -Property alert -EQ $true) {
                 if ($Policy.StateIsCorrect) {
-                    Write-LogMessage -API 'Standards' -tenant $Tenant -message "Quarantine policy $($Policy.displayName) has the correct configuration." -sev Info
-                }
-                else {
+                    Write-LogMessage -API $APIName -tenant $Tenant -message "Quarantine policy $($Policy.displayName) has the correct configuration." -sev Info
+                } else {
                     if ($Policy.missing) {
                         $CurrentInfo = $Policy | Select-Object -Property displayName, missing
                         Write-StandardsAlert -message "Quarantine policy $($Policy.displayName) is missing." -object $CurrentInfo -tenant $Tenant -standardName 'QuarantineTemplate' -standardId $Settings.templateId
-                        Write-LogMessage -API 'Standards' -tenant $Tenant -message "Quarantine policy $($Policy.displayName) is missing." -sev info
-                    }
-                    else {
-                        $CurrentInfo = $CurrentPolicies | Where-Object -Property Name -eq $Policy.displayName | Select-Object -Property Name, ESNEnabled, IncludeMessagesFromBlockedSenderAddress, EndUserQuarantinePermissions
+                        Write-LogMessage -API $APIName -tenant $Tenant -message "Quarantine policy $($Policy.displayName) is missing." -sev info
+                    } else {
+                        $CurrentInfo = $CurrentPolicies | Where-Object -Property Name -EQ $Policy.displayName | Select-Object -Property Name, ESNEnabled, IncludeMessagesFromBlockedSenderAddress, EndUserQuarantinePermissions
                         Write-StandardsAlert -message "Quarantine policy $($Policy.displayName) does not match the expected configuration." -object $CurrentInfo -tenant $Tenant -standardName 'QuarantineTemplate' -standardId $Settings.templateId
-                        Write-LogMessage -API 'Standards' -tenant $Tenant -message "Quarantine policy $($Policy.displayName) does not match the expected configuration. We've generated an alert" -sev info
+                        Write-LogMessage -API $APIName -tenant $Tenant -message "Quarantine policy $($Policy.displayName) does not match the expected configuration. We've generated an alert" -sev info
                     }
                 }
             }
         }
 
         if ($true -in $Settings.report) {
-            # This could do with an improvement. But will work for now or else reporting could be disabled for now
             foreach ($Policy in $CompareList | Where-Object -Property report -EQ $true) {
-                Set-CIPPStandardsCompareField -FieldName "standards.QuarantineTemplate" -FieldValue $Policy.StateIsCorrect -TenantFilter $Tenant
+                # Convert displayName to hex to avoid invalid characters "/, \, #, ?" which are not allowed in RowKey, but "\, #, ?" can be used in quarantine displayName
+                $HexName = -join ($Policy.displayName.ToCharArray() | ForEach-Object { '{0:X2}' -f [int][char]$_ })
+
+                $CurrentValue = @{
+                    displayName                             = $Policy.displayName
+                    EndUserQuarantinePermissions            = $Policy.EndUserQuarantinePermissions
+                    ESNEnabled                              = $Policy.ESNEnabled
+                    IncludeMessagesFromBlockedSenderAddress = $Policy.IncludeMessagesFromBlockedSenderAddress
+                    StateIsCorrect                          = $Policy.StateIsCorrect
+                    missing                                 = $Policy.missing
+                }
+
+                $ExpectedValue = @{
+                    displayName                             = $Policy.displayName
+                    EndUserQuarantinePermissions            = $Policy.EndUserQuarantinePermissions
+                    ESNEnabled                              = $Policy.ESNEnabled
+                    IncludeMessagesFromBlockedSenderAddress = $Policy.IncludeMessagesFromBlockedSenderAddress
+                    StateIsCorrect                          = $true
+                    missing                                 = $false
+                }
+
+                Set-CIPPStandardsCompareField -FieldName "standards.QuarantineTemplate.$HexName" -CurrentValue $CurrentValue -ExpectedValue $ExpectedValue -TenantFilter $Tenant
             }
         }
-    }
-    catch {
+    } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to create or update Quarantine policy/policies, Error: $ErrorMessage" -sev 'Error'
+        Write-LogMessage -API $APIName -tenant $tenant -message "Failed to create or update Quarantine policy/policies, Error: $ErrorMessage" -sev 'Error'
     }
 }
