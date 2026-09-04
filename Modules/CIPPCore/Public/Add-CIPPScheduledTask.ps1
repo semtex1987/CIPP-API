@@ -38,7 +38,8 @@ function Add-CIPPScheduledTask {
                 $ExistingTask.TaskState = 'Planned'
                 Add-CIPPAzDataTableEntity @Table -Entity $ExistingTask -Force
                 Write-LogMessage -headers $Headers -API 'RunNow' -message "Task $($ExistingTask.Name) scheduled to run now" -Sev 'Info' -Tenant $ExistingTask.Tenant
-                Add-CippQueueMessage -Cmdlet 'Start-UserTasksOrchestrator' -Parameters @{
+                # Add-CippQueueMessage returns $true; without discarding it the caller's Results array shows a bare 'true'
+                $null = Add-CippQueueMessage -Cmdlet 'Start-UserTasksOrchestrator' -Parameters @{
                     TaskId = $RowKey
                 }
                 return "Task $($ExistingTask.Name) scheduled to run now"
@@ -257,6 +258,7 @@ function Add-CIPPScheduledTask {
                 AlertComment         = [string]$task.AlertComment
                 CustomSubject        = [string]$task.CustomSubject
                 PsaTicketStrategy    = [string]($task.PsaTicketStrategy.value ?? $task.PsaTicketStrategy)
+                PsaTicketPriority    = [string]($task.PsaTicketPriority.value ?? $task.PsaTicketPriority)
                 PsaTicketId          = [string]($task.PsaTicketId.value ?? $task.PsaTicketId)
             }
 
@@ -361,7 +363,8 @@ function Add-CIPPScheduledTask {
             }
 
             if ($RunNow.IsPresent) {
-                Add-CippQueueMessage -Cmdlet 'Start-UserTasksOrchestrator' -Parameters @{
+                # Add-CippQueueMessage returns $true; without discarding it the caller's Results array shows a bare 'true'
+                $null = Add-CippQueueMessage -Cmdlet 'Start-UserTasksOrchestrator' -Parameters @{
                     TaskId = $RowKey
                 }
                 return "Task $($entity.Name) scheduled to run now"
