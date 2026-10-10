@@ -7,13 +7,19 @@ function New-HaloPSATicket {
     [string]$UserUPN,
     [string]$AzureOID,
     [string]$DisplayName,
-    [int]$TicketId
+    # Per-alert priority override. Left untyped so callers can hand over either a raw Halo
+    # priority id or the {label, value} shape the alert form stores, matching how the
+    # integration-wide DefaultPriority is read below.
+    $TicketPriority,
+    [int]$TicketId,
+    [string]$ConsolidationKey
   )
   #Get HaloPSA Token based on the config we have.
   $Table = Get-CIPPTable -TableName Extensionsconfig
   $Configuration = ((Get-CIPPAzDataTableEntity @Table).config | ConvertFrom-Json).HaloPSA
   $TicketTable = Get-CIPPTable -TableName 'PSATickets'
   $token = Get-HaloToken -configuration $Configuration
+  $UserAgent = Get-CippUserAgent
 
   # Resolve affected user to a HaloPSA contact when the integration is configured for it.
   # Unmatched users fall through to userlookup.id = -1 (the client's General User contact).
@@ -31,10 +37,21 @@ function New-HaloPSATicket {
       $description = "$description<p><em>Affected user: $UnmatchedLabel - no matching HaloPSA contact found, ticket assigned to General User.</em></p>"
     }
   }
+  # A caller may provide a stable consolidation key when the visible title contains
+  # dynamic data such as a timestamp. Without one, retain the existing title behavior.
+  $HashBase = if ([string]::IsNullOrWhiteSpace($ConsolidationKey)) {
+    $title
+  } else {
+    $ConsolidationKey
+  }
 
-  # When linking is active, include UPN in the consolidation key so per-user tickets don't
-  # collapse onto each other when the same alert title fires for multiple users.
-  $HashInput = if ($UserLinkActive -and $UserUPN) { "$title|$UserUPN" } else { $title }
+  # Preserve the existing per-user separation when LinkTicketsToUsers is enabled.
+  $HashInput = if ($UserLinkActive -and $UserUPN) {
+    "$HashBase|$UserUPN"
+  } else {
+    $HashBase
+  }
+
   $TitleHash = Get-StringHash -String $HashInput
 
   # Halo requires a site_id whenever a specific user is set on the ticket; pull it from the
@@ -46,11 +63,19 @@ function New-HaloPSATicket {
   # reference back to the request it came from - so it bypasses the consolidation table entirely.
   # Otherwise fall back to the ticket CIPP opened for this title, when consolidation is enabled.
   $TargetTicketId = $null
+  $LegacyTicket = $null
   if ($TicketId -gt 0) {
     $TargetTicketId = $TicketId
     Write-Information "Targeting caller-supplied HaloPSA ticket: $TargetTicketId"
   } elseif ($Configuration.ConsolidateTickets) {
     $ExistingTicket = Get-CIPPAzDataTableEntity @TicketTable -Filter "PartitionKey eq 'HaloPSA' and RowKey eq '$($client)-$($TitleHash)'"
+    # Tickets opened before a stable key was supplied are stored under the title hash; adopt them
+    # once so a wording change in the title does not fork the open ticket.
+    if (-not $ExistingTicket -and -not [string]::IsNullOrWhiteSpace($ConsolidationKey)) {
+      $LegacyHashInput = if ($UserLinkActive -and $UserUPN) { "$title|$UserUPN" } else { $title }
+      $LegacyTicket = Get-CIPPAzDataTableEntity @TicketTable -Filter "PartitionKey eq 'HaloPSA' and RowKey eq '$($client)-$(Get-StringHash -String $LegacyHashInput)'"
+      $ExistingTicket = $LegacyTicket
+    }
     if ($ExistingTicket) {
       Write-Information "Ticket already exists in HaloPSA: $($ExistingTicket.TicketID)"
       $TargetTicketId = $ExistingTicket.TicketID
@@ -58,10 +83,27 @@ function New-HaloPSATicket {
   }
 
   if ($TargetTicketId) {
-    $Ticket = Invoke-RestMethod -Uri "$($Configuration.ResourceURL)/Tickets/$($TargetTicketId)?includedetails=true&includelastaction=false&nocache=undefined&includeusersassets=false&isdetailscreen=true" -ContentType 'application/json; charset=utf-8' -Method Get -Headers @{Authorization = "Bearer $($token.access_token)" } -SkipHttpErrorCheck
+    $Ticket = Invoke-RestMethod -UserAgent $UserAgent -Uri "$($Configuration.ResourceURL)/Tickets/$($TargetTicketId)?includedetails=true&includelastaction=false&nocache=undefined&includeusersassets=false&isdetailscreen=true" -ContentType 'application/json; charset=utf-8' -Method Get -Headers @{Authorization = "Bearer $($token.access_token)" } -SkipHttpErrorCheck
     if ($Ticket.id) {
       if (!$Ticket.hasbeenclosed) {
         Write-Information 'Ticket is still open, adding new note'
+        if ($LegacyTicket -and $PSCmdlet.ShouldProcess('HaloPSA consolidation row', 'Re-key')) {
+          try {
+            $RekeyedTicket = [PSCustomObject]@{
+              PartitionKey = 'HaloPSA'
+              RowKey       = "$($client)-$($TitleHash)"
+              Title        = $LegacyTicket.Title
+              ClientId     = $LegacyTicket.ClientId
+              TicketID     = $LegacyTicket.TicketID
+            }
+            Add-CIPPAzDataTableEntity @TicketTable -Entity $RekeyedTicket -Force
+            Remove-CIPPAzDataTableEntity @TicketTable -Entity $LegacyTicket -Force
+            Write-Information "Moved consolidation row for ticket $TargetTicketId to its stable key"
+          }
+          catch {
+            Write-Information "Failed to re-key consolidation row for ticket $($TargetTicketId): $($_.Exception.Message)"
+          }
+        }
         # Halo won't take a note without an outcome - it answers "An Outcome must be entered
         # for this Action" - so fall back to 7, the built-in Internal Note outcome, when the
         # integration hasn't been given one. The failure this used to hit was the API user not
@@ -83,7 +125,7 @@ function New-HaloPSATicket {
         $NoteAdded = $false
         try {
           if ($PSCmdlet.ShouldProcess('Add note to HaloPSA ticket', 'Add note')) {
-            $Action = Invoke-RestMethod -Uri "$($Configuration.ResourceURL)/actions" -ContentType 'application/json; charset=utf-8' -Method Post -Body $body -Headers @{Authorization = "Bearer $($token.access_token)" }
+            $Action = Invoke-RestMethod -UserAgent $UserAgent -Uri "$($Configuration.ResourceURL)/actions" -ContentType 'application/json; charset=utf-8' -Method Post -Body $body -Headers @{Authorization = "Bearer $($token.access_token)" }
             Write-Information "Note added to ticket in HaloPSA: $TargetTicketId"
             $NoteAdded = $true
           }
@@ -160,15 +202,45 @@ function New-HaloPSATicket {
     $TicketType = $Configuration.TicketType.value ?? $Configuration.TicketType
     $object | Add-Member -MemberType NoteProperty -Name 'tickettype_id' -Value $TicketType -Force
   }
-  if ($Configuration.DefaultPriority) {
-    $Priority = $Configuration.DefaultPriority.value ?? $Configuration.DefaultPriority
-    $PriorityInt = $Priority -as [int]
+  # Priority sources in precedence order: the per-alert override configured on the alert, then the
+  # integration-wide default. Both can be stored as a {label, value} autocomplete object or as a
+  # raw id depending on where they were saved, so unwrap .value first. A value that isn't a usable
+  # Halo priority id falls through to the next source rather than failing the ticket - Halo applies
+  # the SLA default when priority_id is absent.
+  #
+  # This only runs on the create path. The note path above (a caller-supplied TicketId or a
+  # ConsolidateTickets match) returns before here, so appending a note to an existing ticket
+  # deliberately leaves its priority alone - the same way tickettype_id is not re-applied.
+  $PrioritySources = @(
+    @{ Label = 'alert'; Value = ($TicketPriority.value ?? $TicketPriority) }
+    @{ Label = 'HaloPSA.DefaultPriority'; Value = ($Configuration.DefaultPriority.value ?? $Configuration.DefaultPriority) }
+  )
+  $ResolvedPriority = $null
+  $PrioritySource = $null
+  foreach ($Source in $PrioritySources) {
+    if ([string]::IsNullOrWhiteSpace([string]$Source.Value)) { continue }
+    $PriorityInt = $Source.Value -as [int]
     if ($PriorityInt -and $PriorityInt -gt 0) {
-      $object | Add-Member -MemberType NoteProperty -Name 'priority_id' -Value $PriorityInt -Force
+      $ResolvedPriority = $PriorityInt
+      $PrioritySource = $Source.Label
+      break
+    }
+    # Value isn't a valid Halo priority id (legacy data, hint-row selection, etc.). Skip it rather
+    # than crashing the cast and try the next source.
+    Write-LogMessage -message "HaloPSA priority value '$($Source.Value)' from $($Source.Label) is not a valid priority id - falling back" -API 'HaloPSATicket' -sev Warning
+  }
+
+  # A priority id only means something within an SLA - the same id maps to a different priority
+  # under a different SLA. When the ticket type has no SLA there is nothing for it to resolve
+  # against, so send no priority and let Halo apply its own rather than gambling on whichever SLA
+  # it happens to pick. This is the same test Get-HaloPriority uses to decide it has nothing to
+  # offer, so a priority can never be sent that the settings page would not have let you choose.
+  # Only checked when there is a priority to send, so the common path costs no extra API call.
+  if ($ResolvedPriority) {
+    if (Get-HaloTicketTypeSlaId -TicketType ($Configuration.TicketType.value ?? $Configuration.TicketType) -Configuration $Configuration -Token $token) {
+      $object | Add-Member -MemberType NoteProperty -Name 'priority_id' -Value $ResolvedPriority -Force
     } else {
-      # Stored value isn't a valid Halo priority id (legacy data, hint-row selection, etc.).
-      # Skip priority_id rather than crashing the cast - Halo will fall back to its default.
-      Write-LogMessage -message "HaloPSA.DefaultPriority value '$Priority' is not a valid integer - omitting priority_id from ticket payload" -API 'HaloPSATicket' -sev Warning
+      Write-Information "Ticket type has no SLA attached - omitting priority_id ($ResolvedPriority from $PrioritySource) so HaloPSA applies its own priority"
     }
   }
   # Halo records tickets created over the API as 'Manual' unless the payload carries a source, so
@@ -194,7 +266,7 @@ function New-HaloPSATicket {
   Write-Information $body
   try {
     if ($PSCmdlet.ShouldProcess('Send ticket to HaloPSA', 'Create ticket')) {
-      $Ticket = Invoke-RestMethod -Uri "$($Configuration.ResourceURL)/Tickets" -ContentType 'application/json; charset=utf-8' -Method Post -Body $body -Headers @{Authorization = "Bearer $($token.access_token)" }
+      $Ticket = Invoke-RestMethod -UserAgent $UserAgent -Uri "$($Configuration.ResourceURL)/Tickets" -ContentType 'application/json; charset=utf-8' -Method Post -Body $body -Headers @{Authorization = "Bearer $($token.access_token)" }
       Write-Information "Ticket created in HaloPSA: $($Ticket.id)"
 
       if ($Configuration.ConsolidateTickets) {

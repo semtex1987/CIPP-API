@@ -38,6 +38,7 @@ function Invoke-EditTenant {
                 Write-Host 'Removing alias'
                 Remove-CIPPAzDataTableEntity @PropertiesTable -Entity $AliasEntity
                 $null = Get-Tenants -TenantFilter $customerId -TriggerRefresh
+                Write-LogMessage -headers $Headers -API $APIName -tenant $Tenant.defaultDomainName -TenantId $Tenant.customerId -message "Removed tenant alias for $($Tenant.defaultDomainName)" -Sev 'Info'
             }
         } else {
             $aliasEntity = @{
@@ -50,6 +51,7 @@ function Invoke-EditTenant {
             $Tenant | Add-Member -NotePropertyName 'originalDisplayName' -NotePropertyValue $tenant.displayName -Force
             $Tenant.displayName = $tenantAlias
             $null = Add-CIPPAzDataTableEntity @TenantTable -Entity $Tenant -Force
+            Write-LogMessage -headers $Headers -API $APIName -tenant $Tenant.defaultDomainName -TenantId $Tenant.customerId -message "Set tenant alias to '$tenantAlias'" -Sev 'Info'
         }
 
         # Update tenant groups
@@ -78,7 +80,8 @@ function Invoke-EditTenant {
         }
 
         # Remove any static groups that are no longer selected (dynamic groups are managed by the orchestrator)
-        if ($tenantGroups) {
+        # An empty selection clears static memberships; an omitted or null field leaves them unchanged.
+        if ($null -ne $tenantGroups) {
             foreach ($Group in $CurrentGroupMemberships) {
                 if ($StaticGroupIds -contains $Group.GroupId -and $tenantGroups.GroupId -notcontains $Group.GroupId) {
                     $GroupName = ($StaticGroups | Where-Object { $_.RowKey -eq $Group.GroupId }).Name

@@ -4,7 +4,7 @@ function Send-CIPPScheduledTaskAlert {
         Send post-execution alerts for scheduled tasks
 
     .DESCRIPTION
-        Handles sending alerts (PSA, Email, Webhook) for scheduled task completion
+        Handles sending alerts (PSA, Email, Webhook, Push) for scheduled task completion
 
     .PARAMETER Results
         The results to send in the alert
@@ -126,6 +126,9 @@ function Send-CIPPScheduledTaskAlert {
         }
     }
 
+    # One outcome per delivery attempt (Channel, Result), returned so the caller can keep it with the task.
+    $Outcomes = [System.Collections.Generic.List[object]]::new()
+
     try {
         Write-Information "Sending post-execution alerts for task $($TaskInfo.Name)"
 
@@ -146,7 +149,17 @@ function Send-CIPPScheduledTaskAlert {
 
         # Build HTML with adaptive table styling
         $TableDesign = '<style>table.adaptiveTable{border:1px solid currentColor;background-color:transparent;width:100%;text-align:left;border-collapse:collapse;opacity:0.9}table.adaptiveTable td,table.adaptiveTable th{border:1px solid currentColor;padding:8px 6px;opacity:0.8}table.adaptiveTable tbody td{font-size:13px}table.adaptiveTable tr:nth-child(even){background-color:rgba(128,128,128,0.1)}table.adaptiveTable thead{background-color:rgba(128,128,128,0.2);border-bottom:2px solid currentColor}table.adaptiveTable thead th{font-size:15px;font-weight:700;border-left:1px solid currentColor}table.adaptiveTable thead th:first-child{border-left:none}table.adaptiveTable tfoot{font-size:14px;font-weight:700;background-color:rgba(128,128,128,0.1);border-top:2px solid currentColor}table.adaptiveTable tfoot td{font-size:14px}@media (prefers-color-scheme: dark){table.adaptiveTable{opacity:0.95}table.adaptiveTable tr:nth-child(even){background-color:rgba(255,255,255,0.05)}table.adaptiveTable thead{background-color:rgba(255,255,255,0.1)}table.adaptiveTable tfoot{background-color:rgba(255,255,255,0.05)}}</style>'
-        $EncodedTaskName = [System.Web.HttpUtility]::HtmlEncode($TaskInfo.Name)
+        # Scripted alerts store Name as "{tenant labels}: {subject}". That list must not appear in
+        # per-tenant PSA/email bodies - Tenant is already on the next line. Prefer CustomSubject,
+        # else strip the leading scope for Alert deliveries, else keep the full Name.
+        $DisplayTitle = if (![string]::IsNullOrWhiteSpace($TaskInfo.CustomSubject)) {
+            [string]$TaskInfo.CustomSubject
+        } elseif ($TaskType -eq 'Alert' -and "$($TaskInfo.Name)" -match '^[^:]+:\s*(.+)$') {
+            $Matches[1].Trim()
+        } else {
+            [string]$TaskInfo.Name
+        }
+        $EncodedTaskName = [System.Web.HttpUtility]::HtmlEncode($DisplayTitle)
         $EncodedTenantName = [System.Web.HttpUtility]::HtmlEncode($TenantFilter)
         $AlertHeader = "<div style=`"margin:0 0 14px;`"><p style=`"margin:0 0 2px;font-size:15px;font-weight:600;`">$EncodedTaskName</p><p style=`"margin:0;font-size:13px;opacity:0.75;`">Tenant: <strong>$EncodedTenantName</strong></p></div>"
         # Commands that also serve an HTTP caller return a single row carrying the result lines plus
@@ -220,11 +233,12 @@ function Send-CIPPScheduledTaskAlert {
             $HTML += $AlertCommentHtml
         }
 
-        # Build title — honor CustomSubject if set on the task row, otherwise use default format
+        # Build title — honor CustomSubject if set on the task row, otherwise use DisplayTitle
+        # so multi-tenant alert Names do not leak other client labels into the ticket subject.
         $title = if (![string]::IsNullOrWhiteSpace($TaskInfo.CustomSubject)) {
             "$($TaskInfo.CustomSubject) - $TenantFilter"
         } else {
-            "$TaskType - $TenantFilter - $($TaskInfo.Name)"
+            "$TaskType - $TenantFilter - $DisplayTitle"
         }
         if ($TaskInfo.Reference) {
             $title += " - Reference: $($TaskInfo.Reference)"
@@ -247,6 +261,12 @@ function Send-CIPPScheduledTaskAlert {
             '*psa*' {
                 $PsaSplitSent = $false
                 $TaskAffectedUser = $null
+                # Per-task PSA ticket priority (configured on the alert) overrides the global
+                # HaloPSA.DefaultPriority. Empty on tasks saved before this field existed, in which
+                # case New-HaloPSATicket falls back to the integration default. Read here rather
+                # than inside the try so the consolidated fallback path below can use it even when
+                # the affected-user resolution throws.
+                $TaskPsaPriority = $TaskInfo.PsaTicketPriority
                 # A task can name the ticket the work came from, either explicitly (PsaTicketId, set
                 # from the ticket box on the wizards) or inside its free-text reference. Both travel
                 # with the alert so a PSA that recognises them can add the result to that ticket
@@ -254,6 +274,10 @@ function Send-CIPPScheduledTaskAlert {
                 # below carries them, so a split task's per-user notes land on the same ticket.
                 $PsaReference = $TaskInfo.Reference
                 $PsaTicketId = $TaskInfo.PsaTicketId
+                # Consolidate on the task's identity rather than the visible title, so rewording
+                # the title does not open a second ticket for the same task.
+                $PsaTaskKey = if ($TaskInfo.RowKey) { $TaskInfo.RowKey } else { $TaskInfo.Name }
+                $PsaConsolidationKey = if ($PsaTaskKey) { "$TenantFilter|$PsaTaskKey" } else { $null }
                 try {
                     $ExtConfigTable = Get-CIPPTable -TableName Extensionsconfig
                     $ExtConfig = (Get-CIPPAzDataTableEntity @ExtConfigTable).config | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -341,9 +365,10 @@ function Send-CIPPScheduledTaskAlert {
                                     if ([string]::IsNullOrWhiteSpace($GroupKey)) {
                                         # Rows without a usable user identifier - fall back to the
                                         # task-level affected user if one was resolved.
-                                        $GroupParams = @{ Type = 'psa'; Title = $title; HTMLContent = $GroupHTML; TenantFilter = $TenantFilter; PSAReference = $PsaReference; PSATicketId = $PsaTicketId }
+                                        $GroupParams = @{ Type = 'psa'; Title = $title; HTMLContent = $GroupHTML; TenantFilter = $TenantFilter; PSAReference = $PsaReference; PSATicketId = $PsaTicketId; PSAConsolidationKey = $PsaConsolidationKey }
                                         if ($TaskAffectedUser) { $GroupParams.AffectedUser = $TaskAffectedUser }
-                                        Send-CIPPAlert @GroupParams
+                                        if ($TaskPsaPriority) { $GroupParams.PsaTicketPriority = $TaskPsaPriority }
+                                        $Outcomes.Add([pscustomobject]@{ Channel = 'PSA'; Result = [string]((Send-CIPPAlert @GroupParams) -join ' ') })
                                     } else {
                                         $GroupDisplayName = if ($DisplayField) { $Group.Group[0].$DisplayField } else { $null }
                                         $UserLabel = if ($GroupDisplayName) { "$GroupDisplayName ($GroupKey)" } else { $GroupKey }
@@ -352,7 +377,9 @@ function Send-CIPPScheduledTaskAlert {
                                             UPN         = $GroupKey
                                             DisplayName = $GroupDisplayName
                                         }
-                                        Send-CIPPAlert -Type 'psa' -Title $UserTitle -HTMLContent $GroupHTML -TenantFilter $TenantFilter -AffectedUser $AffectedUser -PSAReference $PsaReference -PSATicketId $PsaTicketId
+                                        $UserParams = @{ Type = 'psa'; Title = $UserTitle; HTMLContent = $GroupHTML; TenantFilter = $TenantFilter; AffectedUser = $AffectedUser; PSAReference = $PsaReference; PSATicketId = $PsaTicketId; PSAConsolidationKey = $(if ($PsaConsolidationKey) { "$PsaConsolidationKey|$GroupKey" }) }
+                                        if ($TaskPsaPriority) { $UserParams.PsaTicketPriority = $TaskPsaPriority }
+                                        $Outcomes.Add([pscustomobject]@{ Channel = 'PSA'; Result = [string]((Send-CIPPAlert @UserParams) -join ' ') })
                                     }
                                 }
                                 $PsaSplitSent = $true
@@ -364,10 +391,28 @@ function Send-CIPPScheduledTaskAlert {
                 }
 
                 if (-not $PsaSplitSent) {
-                    $PsaParams = @{ Type = 'psa'; Title = $title; HTMLContent = (ConvertTo-PSAHtml -Html $HTML); TenantFilter = $TenantFilter; PSAReference = $PsaReference; PSATicketId = $PsaTicketId }
+                    $PsaParams = @{ Type = 'psa'; Title = $title; HTMLContent = (ConvertTo-PSAHtml -Html $HTML); TenantFilter = $TenantFilter; PSAReference = $PsaReference; PSATicketId = $PsaTicketId; PSAConsolidationKey = $PsaConsolidationKey }
                     if ($TaskAffectedUser) { $PsaParams.AffectedUser = $TaskAffectedUser }
-                    Send-CIPPAlert @PsaParams
+                    if ($TaskPsaPriority) { $PsaParams.PsaTicketPriority = $TaskPsaPriority }
+                    $Outcomes.Add([pscustomobject]@{ Channel = 'PSA'; Result = [string]((Send-CIPPAlert @PsaParams) -join ' ') })
                 }
+            }
+            '*push*' {
+                # Only the CIPP operator who created the task gets the push; there is no tenant-wide push
+                # channel and the affected M365 user is never the target. Devices are keyed on the decoded
+                # principal's userDetails (see Invoke-ExecPushSubscription), so resolve the same value here
+                # rather than trusting the separate -name header, which is the app id for API clients.
+                $PushTarget = $ExecutingUser
+                try {
+                    $Principal = $TaskParameters.Headers.'x-ms-client-principal'
+                    if ($Principal) {
+                        $Decoded = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Principal)) | ConvertFrom-Json).userDetails
+                        if ($Decoded) { $PushTarget = $Decoded }
+                    }
+                } catch { Write-Information "Could not decode the task principal for push: $($_.Exception.Message)" }
+                $PushCount = if ($Results -is [array]) { $Results.Count } else { 1 }
+                $TaskUrl = if ($TaskInfo.RowKey) { "/cipp/scheduler/task?id=$($TaskInfo.RowKey)" } else { '/cipp/scheduler' }
+                $Outcomes.Add([pscustomobject]@{ Channel = 'Push'; Result = [string]((Send-CIPPAlert -Type 'push' -TargetUser $PushTarget -Title $title -PushMessage "$TaskType finished for $TenantFilter with $PushCount result(s)" -Url $TaskUrl -APIName 'Scheduled Task Alerts') -join ' ') })
             }
             '*email*' {
                 # Deliberately untouched by PsaTicketId: that field drives the PSA note only. What a
@@ -383,7 +428,7 @@ function Send-CIPPScheduledTaskAlert {
                 if ($TaskAttachments) {
                     $EmailParams.Attachments = $TaskAttachments
                 }
-                Send-CIPPAlert @EmailParams
+                $Outcomes.Add([pscustomobject]@{ Channel = 'Email'; Result = [string]((Send-CIPPAlert @EmailParams) -join ' ') })
             }
             '*webhook*' {
                 # Build per-item snooze metadata for alert tasks
@@ -394,7 +439,7 @@ function Send-CIPPScheduledTaskAlert {
                             apiEndpoint = '/api/ExecSnoozeAlert'
                             cmdletName  = $TaskInfo.Command
                             tenant      = $TenantFilter
-                            durations   = @(7, 14, 30, -1)
+                            durations   = @(7, 14, 30, 90)
                             items       = @($Results | ForEach-Object {
                                     $HashResult = Get-AlertContentHash -AlertItem $_
                                     [PSCustomObject]@{
@@ -441,7 +486,7 @@ function Send-CIPPScheduledTaskAlert {
                     if ($SnoozeInfo) { $obj | Add-Member -NotePropertyName 'Snooze' -NotePropertyValue $SnoozeInfo }
                     $obj
                 }
-                Send-CIPPAlert -Type 'webhook' -Title $title -TenantFilter $TenantFilter -JSONContent $($Webhook | ConvertTo-Json -Depth 20) -APIName 'Scheduled Task Alerts' -SchemaSource $TaskType -InvokingCommand $TaskInfo.Command -UseStandardizedSchema:$UseStandardizedSchema
+                $Outcomes.Add([pscustomobject]@{ Channel = 'Webhook'; Result = [string]((Send-CIPPAlert -Type 'webhook' -Title $title -TenantFilter $TenantFilter -JSONContent $($Webhook | ConvertTo-Json -Depth 20) -APIName 'Scheduled Task Alerts' -SchemaSource $TaskType -InvokingCommand $TaskInfo.Command -UseStandardizedSchema:$UseStandardizedSchema) -join ' ') })
             }
         }
 
@@ -450,5 +495,7 @@ function Send-CIPPScheduledTaskAlert {
     } catch {
         Write-Warning "Failed to send scheduled task alerts: $($_.Exception.Message)"
         Write-LogMessage -API 'Scheduler_Alerts' -tenant $TenantFilter -message "Failed to send alerts for task $($TaskInfo.Name): $($_.Exception.Message)" -sev Error
+        $Outcomes.Add([pscustomobject]@{ Channel = 'All'; Result = "Error: $($_.Exception.Message)" })
     }
+    return @($Outcomes)
 }
